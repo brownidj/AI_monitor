@@ -9,3 +9,5 @@ __pycache__/
 backend/data/
 mobile/.dart_tool/
 mobile/build/
+build/
+macOS/.build/

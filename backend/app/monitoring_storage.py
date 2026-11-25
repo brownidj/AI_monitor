@@ -7,7 +7,9 @@ from pathlib import Path
 from uuid import UUID
 
 from .exchange_rates import convert_totals
-from .models import CostRow, CostsReport
+from .jetbrains import SCOPE as JETBRAINS_SCOPE
+from .jetbrains import JetBrainsPreferences, candidates
+from .models import CostRow, CostsReport, JetBrainsSnapshot, Subscription
 from .monitoring_models import (
     Alert,
     DailyCost,
@@ -68,6 +70,9 @@ class MonitoringStore:
                 "(id INTEGER PRIMARY KEY CHECK (id = 1), "
                 "owner TEXT NOT NULL, expires REAL NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS exchange_rate "
+                "(id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS jetbrains_rule_receipts (event_key TEXT PRIMARY KEY)",
+                "CREATE TABLE IF NOT EXISTS jetbrains_settings "
                 "(id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)",
             ]
             for statement in statements:
@@ -448,9 +453,9 @@ class MonitoringStore:
             return [
                 Alert.model_validate_json(row[0])
                 for row in connection.execute(
-                    "SELECT payload FROM alert_events WHERE scope = ? "
+                    "SELECT payload FROM alert_events WHERE scope IN (?, ?) "
                     "ORDER BY created_at DESC, id LIMIT ?",
-                    (scope, limit),
+                    (scope, JETBRAINS_SCOPE, limit),
                 )
             ]
 
@@ -459,7 +464,8 @@ class MonitoringStore:
             return [
                 alert
                 for (payload,) in connection.execute(
-                    "SELECT payload FROM alert_events WHERE scope = ? ORDER BY created_at", (scope,)
+                    "SELECT payload FROM alert_events WHERE scope IN (?, ?) ORDER BY created_at",
+                    (scope, JETBRAINS_SCOPE),
                 )
                 if (alert := Alert.model_validate_json(payload)).delivery_state
                 in ("pending", "failed", "inbox_only", "unsupported")
@@ -468,17 +474,93 @@ class MonitoringStore:
     def update_alert(self, scope: str, alert_id: UUID, **changes) -> Alert | None:
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT payload FROM alert_events WHERE scope = ? AND id = ?",
-                (scope, str(alert_id)),
+                "SELECT payload FROM alert_events WHERE scope IN (?, ?) AND id = ?",
+                (scope, JETBRAINS_SCOPE, str(alert_id)),
             ).fetchone()
             if row is None:
                 return None
             alert = Alert.model_validate_json(row[0]).model_copy(update=changes)
             connection.execute(
-                "UPDATE alert_events SET payload = ? WHERE scope = ? AND id = ?",
-                (alert.model_dump_json(), scope, str(alert_id)),
+                "UPDATE alert_events SET payload = ? WHERE scope IN (?, ?) AND id = ?",
+                (alert.model_dump_json(), scope, JETBRAINS_SCOPE, str(alert_id)),
             )
             return alert
+
+    @staticmethod
+    def _jetbrains_preferences(connection) -> JetBrainsPreferences:
+        row = connection.execute("SELECT payload FROM jetbrains_settings WHERE id = 1").fetchone()
+        return JetBrainsPreferences.model_validate_json(row[0]) if row else JetBrainsPreferences()
+
+    def jetbrains_preferences(self) -> JetBrainsPreferences:
+        with self.connection() as connection:
+            return self._jetbrains_preferences(connection)
+
+    def save_jetbrains_preferences(self, value: JetBrainsPreferences) -> JetBrainsPreferences:
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT INTO jetbrains_settings VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
+                (value.model_dump_json(),),
+            )
+        return value
+
+    def evaluate_jetbrains(self, now: datetime, timezone: str) -> int:
+        with self.connection() as connection:
+            snapshots = [
+                JetBrainsSnapshot.model_validate_json(payload)
+                for (payload,) in connection.execute(
+                    "SELECT payload FROM records WHERE kind = 'jetbrains'"
+                )
+            ]
+            subscriptions = [
+                Subscription.model_validate_json(payload)
+                for (payload,) in connection.execute(
+                    "SELECT payload FROM records WHERE kind = 'subscription'"
+                )
+            ]
+            _, events = candidates(
+                snapshots,
+                subscriptions,
+                now,
+                timezone,
+                self._jetbrains_preferences(connection).no_topups,
+            )
+            desired = {key for key, _ in events}
+            # Supersede data warnings or reminder events whose inputs are no longer current.
+            for key, payload in list(
+                connection.execute(
+                    "SELECT event_key, payload FROM alert_events WHERE scope = ?",
+                    (JETBRAINS_SCOPE,),
+                )
+            ):
+                alert = Alert.model_validate_json(payload)
+                if key not in desired and alert.delivery_state != "submitted_to_macos":
+                    alert.delivery_state = "expired"
+                    connection.execute(
+                        "UPDATE alert_events SET payload = ? WHERE event_key = ?",
+                        (alert.model_dump_json(), key),
+                    )
+            unseen = []
+            for key, alert in events:
+                if connection.execute(
+                    "INSERT OR IGNORE INTO jetbrains_rule_receipts VALUES (?)", (key,)
+                ).rowcount:
+                    unseen.append((key, alert))
+            lows = [(key, alert) for key, alert in unseen if alert.kind == "jetbrains_low_credits"]
+            if lows:
+                selected = {}
+                for key, alert in lows:
+                    identity = alert.details.get("licence_id", "unassigned")
+                    if identity not in selected or int(alert.details["threshold_percent"]) < int(
+                        selected[identity][1].details["threshold_percent"]
+                    ):
+                        selected[identity] = (key, alert)
+                unseen = [
+                    (key, alert) for key, alert in unseen if alert.kind != "jetbrains_low_credits"
+                ] + list(selected.values())
+            return sum(
+                self._insert_alert(connection, JETBRAINS_SCOPE, key, alert) for key, alert in unseen
+            )
 
     def add_test_alert(self, scope: str, now: datetime) -> Alert:
         alert = Alert(

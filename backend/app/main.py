@@ -14,6 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .collectors.openai_costs import CollectorError, collect_costs
 from .config import Settings
 from .forecasting import forecast_recharge, renewal_previews
+from .jetbrains import JetBrainsPreferences
 from .models import (
     CostsReport,
     JetBrainsSnapshot,
@@ -33,28 +34,46 @@ from .monitoring_models import (
     SavedPreferences,
 )
 from .monitoring_storage import MonitoringStore
+from .overview import OverviewService, PoolSettings
+from .recommendations import RecommendationPreferences
 from .storage import Store
 
 
 def create_app(
-    settings: Settings | None = None, transport=None, notifier=None, clock=None
+    settings: Settings | None = None,
+    transport=None,
+    notifier=None,
+    clock=None,
+    codex_probe=None,
+    central_probe=None,
 ) -> FastAPI:
     config = settings or Settings()
     store = Store(config.database_path)
     monitoring_store = MonitoringStore(config.database_path)
     monitor = Monitor(config, monitoring_store, transport=transport, notifier=notifier, clock=clock)
+    overview = OverviewService(
+        config, monitor, transport=transport, codex_probe=codex_probe, central_probe=central_probe
+    )
 
     @asynccontextmanager
     async def lifespan(app):
         store.initialize()
         monitoring_store.initialize()
+        overview.store.initialize()
         app.state.monitor = monitor
         app.state.monitor_task = (
             asyncio.create_task(monitor.serve()) if config.scheduler_enabled else None
         )
+        app.state.usage_task = (
+            asyncio.create_task(overview.serve()) if config.scheduler_enabled else None
+        )
         try:
             yield
         finally:
+            if app.state.usage_task is not None:
+                app.state.usage_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await app.state.usage_task
             if app.state.monitor_task is not None:
                 app.state.monitor_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -76,6 +95,26 @@ def create_app(
 
     protected = [Depends(authorize)]
 
+    @app.get("/v1/overview", dependencies=protected)
+    def usage_overview():
+        return overview.cards()
+
+    @app.post("/v1/overview/refresh", dependencies=protected)
+    async def refresh_overview():
+        return await overview.refresh()
+
+    @app.put("/v1/overview/recommendation", dependencies=protected)
+    def save_recommendation(value: RecommendationPreferences) -> RecommendationPreferences:
+        return overview.store.save_recommendation_preferences(value)
+
+    @app.get("/v1/overview/free-pools", dependencies=protected)
+    def free_pool_settings() -> PoolSettings:
+        return overview.store.settings(monitor.scope)
+
+    @app.put("/v1/overview/free-pools", dependencies=protected)
+    def save_free_pool_settings(value: PoolSettings) -> PoolSettings:
+        return overview.store.save_settings(monitor.scope, value)
+
     @app.get("/health")
     def health():
         return {"status": "ok", "version": "0.2.0"}
@@ -91,7 +130,11 @@ def create_app(
                 is not None,
                 "cost_history": True,
             },
-            "jetbrains": {"mode": "manual_credit_snapshots", "live_balance_api": False},
+            "jetbrains": {
+                "mode": "central_cli" if config.central_licence_ids else "manual_credit_snapshots",
+                "automatic_licence_ids": config.central_licence_ids,
+                "live_balance_api": False,
+            },
             "notifications": {
                 "mode": "persistent_inbox_and_desktop",
                 "push_enabled": False,
@@ -173,34 +216,68 @@ def create_app(
         return store.subscriptions()
 
     @app.post("/v1/subscriptions", status_code=201, dependencies=protected)
-    def add_subscription(value: SubscriptionInput) -> Subscription:
+    async def add_subscription(value: SubscriptionInput) -> Subscription:
         record = Subscription(**value.model_dump())
         store.put("subscription", record)
+        await monitor.check_jetbrains()
         return record
 
     @app.put("/v1/subscriptions/{record_id}", dependencies=protected)
-    def update_subscription(record_id: UUID, value: SubscriptionInput) -> Subscription:
+    async def update_subscription(record_id: UUID, value: SubscriptionInput) -> Subscription:
         existing = next((row for row in store.subscriptions() if row.id == record_id), None)
         if existing is None:
             raise HTTPException(404, "Subscription not found")
         record = Subscription(**value.model_dump(), id=record_id, created_at=existing.created_at)
         store.put("subscription", record)
+        await monitor.check_jetbrains()
         return record
 
     @app.delete("/v1/subscriptions/{record_id}", status_code=204, dependencies=protected)
-    def delete_subscription(record_id: UUID):
+    async def delete_subscription(record_id: UUID):
         if not store.delete("subscription", record_id):
             raise HTTPException(404, "Subscription not found")
+        await monitor.check_jetbrains()
         return Response(status_code=204)
 
     @app.get("/v1/jetbrains/snapshots", dependencies=protected)
     def snapshots() -> list[JetBrainsSnapshot]:
         return store.snapshots()
 
+    @app.get("/v1/jetbrains/summary", dependencies=protected)
+    def jetbrains_summary() -> dict:
+        preferences = monitoring_store.jetbrains_preferences()
+        return {
+            "licences": overview.jetbrains_summaries(),
+            **preferences.model_dump(),
+            "pycharm_selected": "unknown",
+        }
+
+    @app.get("/v1/jetbrains/settings", dependencies=protected)
+    def jetbrains_settings() -> JetBrainsPreferences:
+        return monitoring_store.jetbrains_preferences()
+
+    @app.put("/v1/jetbrains/settings", dependencies=protected)
+    async def save_jetbrains_settings(value: JetBrainsPreferences) -> JetBrainsPreferences:
+        saved = monitoring_store.save_jetbrains_preferences(value)
+        await monitor.check_jetbrains()
+        return saved
+
+    @app.post("/v1/jetbrains/check", dependencies=protected)
+    async def check_jetbrains():
+        return {"alerts_created": await monitor.check_jetbrains()}
+
+    @app.delete("/v1/jetbrains/snapshots/{record_id}", status_code=204, dependencies=protected)
+    async def delete_snapshot(record_id: UUID):
+        if not store.delete("jetbrains", record_id):
+            raise HTTPException(404, "Snapshot not found")
+        await monitor.check_jetbrains()
+        return Response(status_code=204)
+
     @app.post("/v1/jetbrains/snapshots", status_code=201, dependencies=protected)
-    def add_snapshot(value: JetBrainsSnapshotInput) -> JetBrainsSnapshot:
+    async def add_snapshot(value: JetBrainsSnapshotInput) -> JetBrainsSnapshot:
         record = JetBrainsSnapshot(**value.model_dump())
         store.put("jetbrains", record)
+        await monitor.check_jetbrains()
         return record
 
     @app.post("/v1/forecasts/recharge", dependencies=protected)

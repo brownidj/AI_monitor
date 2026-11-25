@@ -45,3 +45,7 @@ The process cannot detect and report its own complete shutdown, a powered-off Ma
 ## Verification evidence
 
 The automated suite uses synthetic HTTP responses and a fake notifier. It exercises the actual background loop through the FastAPI lifespan, multi-process lease contention, cancellation, persistence/restarts, atomic rollback, decimal precision, all three thresholds, month rollover, policy changes, FX direction/freshness, error recovery, acknowledgment and notification retry behavior. Live provider collection and local OS submission are verified separately when configuring the user's running instance.
+
+## JetBrains automatic quota
+
+The Mac app can collect verified personal licences through Central CLI every five minutes while monitoring is enabled. Configure `MONITOR_CENTRAL_LICENCE_IDS` as a JSON array and optionally `MONITOR_CENTRAL_EXECUTABLE` in the private app configuration, then restart. Central must already be signed in and its EAP terms accepted. The collector verifies each licence identity, temporarily selects it, reads quota, and restores the original Central selection. It pauses while Central's proxy runs. PyCharm selection remains independent. See [the Mac app guide](mac_app.md#automatic-jetbrains-collection-v080) for interruption recovery and freshness behavior.

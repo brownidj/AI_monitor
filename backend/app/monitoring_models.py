@@ -57,6 +57,13 @@ class Alert(Model):
         "monitor_failure",
         "monitor_recovered",
         "test",
+        "jetbrains_low_credits",
+        "jetbrains_stale",
+        "jetbrains_reset",
+        "jetbrains_expiry",
+        "jetbrains_depletion",
+        "jetbrains_renewal",
+        "jetbrains_unused",
     ]
     severity: Literal["info", "warning", "urgent"]
     title: str

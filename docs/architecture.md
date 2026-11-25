@@ -93,3 +93,7 @@ Send collection failures only after repeated failures and deduplicate them until
 The earlier conversation left cloud, Mac mini and hybrid hosting unresolved. Develop locally now. Continuous cloud hosting is the proposed production direction, subject to choosing a host and acceptable recurring cost; no hosting service has been provisioned. A local-only deployment must clearly disclose that monitoring depends on the Mac being awake and connected.
 
 Before phone access or cloud deployment, implement user authentication, HTTPS, secret management, backups and alert delivery. Keep provider Admin keys server-side with restricted access and rotate/revoke them through the provider when necessary. No account or cloud credential has been created by this scaffold.
+
+### v0.7.0 licence separation
+
+`JetBrainsLicence` records keep identity, validity and annual billing apart from quota observations. Snapshots carry a licence ID and nullable monthly reset; summaries filter by identity before forecasting. Alerts namespace receipt keys by licence and select the most urgent newly crossed threshold for each licence. The summary API exposes an array instead of a single combined balance. Manual collection does not require changing IDE authorization. No supported live balance interface has been established; entry remains manual.

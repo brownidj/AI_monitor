@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     )
     timezone: str = Field(default="Australia/Brisbane", validation_alias="MONITOR_TIMEZONE")
     scheduler_enabled: bool = Field(default=True, validation_alias="MONITOR_SCHEDULER_ENABLED")
+    codex_executable: Path | None = Field(default=None, validation_alias="MONITOR_CODEX_EXECUTABLE")
+    central_executable: Path | None = Field(
+        default=None, validation_alias="MONITOR_CENTRAL_EXECUTABLE"
+    )
+    central_licence_ids: list[str] = Field(
+        default_factory=list, validation_alias="MONITOR_CENTRAL_LICENCE_IDS"
+    )
 
     @field_validator("timezone")
     @classmethod

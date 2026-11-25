@@ -12,6 +12,16 @@ from app.main import create_app
 from app.models import RechargeInput, Subscription
 
 HEADERS = {"Authorization": "Bearer test-token"}
+
+
+@pytest.fixture(autouse=True)
+def no_real_desktop_notifications(monkeypatch):
+    async def submit(self, alert):
+        return "submitted_to_macos", None
+
+    monkeypatch.setattr("app.notifications.MacNotifier.submit", submit)
+
+
 SUBSCRIPTION = {
     "provider": "chatgpt",
     "plan": "Example plan",

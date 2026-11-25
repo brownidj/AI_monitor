@@ -151,11 +151,25 @@ class Monitor:
             finally:
                 self.store.release(owner)
 
+    async def check_jetbrains(self) -> int:
+        owner = str(uuid4())
+        now = self.clock().astimezone(UTC)
+        if not self.store.acquire(owner, now):
+            return 0
+        try:
+            created = self.store.evaluate_jetbrains(now, self.config.timezone)
+            await self.dispatch_alerts()
+            return created
+        finally:
+            self.store.release(owner)
+
     async def serve(self):
         """The web-server lifespan owns this task; reload/shutdown cancels and releases it."""
         while True:
             try:
                 if self.config.api_token.get_secret_value():
+                    # Personal JetBrains rules are independent of an OpenAI key or cost sync.
+                    await self.check_jetbrains()
                     await self.run_once(only_if_due=True)
                     if self.store.preferences().enabled:
                         await self.dispatch_pending()

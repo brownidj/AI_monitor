@@ -31,10 +31,12 @@ class Subscription(SubscriptionInput):
 
 
 class JetBrainsSnapshotInput(Model):
+    licence_id: str = "unassigned"
     monthly_allocation: Annotated[Decimal, Field(gt=0, max_digits=20, decimal_places=8)]
     monthly_remaining: Quantity
     top_up_remaining: Quantity = Decimal("0")
-    next_reset_date: date
+    next_reset_date: date | None = None
+    next_reset_at: AwareDatetime | None = None
     top_up_expires_on: date | None = None
     observed_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -47,7 +49,7 @@ class JetBrainsSnapshotInput(Model):
 
 class JetBrainsSnapshot(JetBrainsSnapshotInput):
     id: UUID = Field(default_factory=uuid4)
-    source: Literal["manual"] = "manual"
+    source: Literal["manual", "central_cli"] = "manual"
     unit: Literal["ai_credits"] = "ai_credits"
 
 
@@ -103,3 +105,11 @@ class RenewalPreview(Model):
     currency: Currency
     source: Literal["manual"] = "manual"
     delivery_status: Literal["preview_only"] = "preview_only"
+
+
+class JetBrainsLicence(Model):
+    id: str = Field(min_length=1, max_length=80)
+    valid_through: date | None = None
+    next_annual_billing: date | None = None
+    annual_amount_usd: Quantity | None = None
+    billing_note: str = ""

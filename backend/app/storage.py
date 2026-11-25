@@ -3,7 +3,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import UUID
 
-from .models import JetBrainsSnapshot, Subscription
+from .models import JetBrainsLicence, JetBrainsSnapshot, Subscription
 
 
 class Store:
@@ -39,6 +39,12 @@ class Store:
 
     def subscriptions(self) -> list[Subscription]:
         return [Subscription.model_validate_json(row) for row in self.list_records("subscription")]
+
+    def licences(self) -> list[JetBrainsLicence]:
+        return [
+            JetBrainsLicence.model_validate_json(row)
+            for row in self.list_records("jetbrains_licence")
+        ]
 
     def snapshots(self) -> list[JetBrainsSnapshot]:
         return sorted(
